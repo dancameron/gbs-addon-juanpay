@@ -14,6 +14,7 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	const MODE_TEST = 'sandbox';
 	const MODE_LIVE = 'live';
 	const RETURN_URL_OPTION = 'gb_juanpay_return_url';
+	const LISTENER_QA = 'juanpay_dpn';
 
 	const PAYMENT_METHOD = 'Juanpay';
 	const USE_PROXY = FALSE;
@@ -80,6 +81,7 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 
 		// Handle the return of user from juanpay
 		add_action('gb_load_cart', array($this,'back_from_juanpay'), 10, 0);
+		add_action('gb_payment_handler', array($this,'back_from_juanpay'), 10, 0);
 
 		// Remove the review page since it's at juanpay
 		add_filter('gb_checkout_pages', array($this, 'remove_review_page'));
@@ -124,6 +126,16 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 						'option' => array(
 							'type' => 'text',
 							'default' => self::$api_email
+							)
+						),
+					'notice' => array(
+						'label' => self::__( 'DPN Listener URL' ),
+						'option' => array(
+							'type' => 'text',
+							'default' => Group_Buying_Offsite_Processor_Handler::get_url(),
+							'attributes' => array(
+								'disabled' => 'disabled',
+								)
 							)
 						)
 					)
@@ -205,8 +217,8 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 		$_html = array();
 		$_html[] = "<html>";
 		$_html[] = "<head><title>Processing Payment...</title></head>";
-		//$_html[] = "<body onLoad=\"document.forms['juanpay_form'].submit();\">";
-		$_html[] = "<body>";
+		$_html[] = "<body onLoad=\"document.forms['juanpay_form'].submit();\">";
+		//$_html[] = "<body>";
 		$_html[] = '<center><img src="'. gb_get_header_logo() .'"></center>';
 		$_html[] =  "<center><h2>";
 		$_html[] = self::__("Please wait, your order is being processed and you will be redirected to the Juanpay website.");
@@ -256,8 +268,6 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 			// Remove that review page since we're now returned.
 			add_filter('gb_checkout_pages', array($this, 'remove_checkout_page'));
 			$_REQUEST['gb_checkout_action'] = 'back_from_juanpay';
-			do_action( 'gb_log', __CLASS__ . '::' . __FUNCTION__ . ' - BACK FROM JUANPAY (REQUEST)', $_REQUEST );
-			do_action( 'gb_log', __CLASS__ . '::' . __FUNCTION__ . ' - BACK FROM JUANPAY (POST)', $_POST );
 		}
 		if ( !empty($_POST) && !isset($_POST['gb_checkout_action']) ) {
 			self::listener( $_POST );
@@ -347,8 +357,11 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	 */
 	public function listener() {
 		// Try to validate the response to make sure it's from JuanPay
-		if ( self::check_ipn_request_is_valid() )
-			successful_ipn();
+		if ( self::check_ipn_request_is_valid() ) {
+			if ( self::maybe_mark_payment_complete() ) {
+				exit();
+			}
+		}
 
 		$error = gb__( 'JuanPay Purchase Error. Contact the Store Owner.' );
 		self::set_message( $error, self::MESSAGE_STATUS_ERROR );
@@ -378,15 +391,10 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 		// Post back to get a response
 		$response = wp_remote_post( self::get_api_url()."/dpn/validate", $params );
 
-		do_action( 'gb_log', __CLASS__ . '::' . __FUNCTION__ . ' - DPN Response:', $response );
-
 		// check to see if the request was valid
 		if ( ! is_wp_error( $response ) && $response['response']['code'] >= 200 && $response['response']['code'] < 300 && ( strcmp( $response['body'], "VERIFIED" ) == 0 ) ) {
-			do_action( 'gb_log', __CLASS__ . '::' . __FUNCTION__ . ' - Received valid response from JuanPay:', $response );
 			return true;
 		}
-
-		do_action( 'gb_log', __CLASS__ . '::' . __FUNCTION__ . ' - Error response:', $response->get_error_message() );
 		return false;
 	}
 
@@ -398,54 +406,71 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	 * @param array $stripped_post
 	 * @return void
 	 */
-	public static function successful_ipn() {
+	public static function maybe_mark_payment_complete() {
 		$complete = FALSE;
 		$stripped_post = stripslashes_deep( $_POST );
-		$payment_id = self::get_payment_id( $stripped_post );
-		$order_number = (int) $stripped_post['order_number'];
-
-		do_action( 'gb_log', __CLASS__ . '::' . __FUNCTION__ . ' - Successfull Request:', $stripped_post );
 
 		if ($stripped_post['status'] == 'Confirmed' || $stripped_post['status'] == 'Underpaid') {
 			// Order confirmed but unpaid.
 		}
 		if ($stripped_post['status'] == 'Paid' || $stripped_post['status'] == 'Overpaid') {
-
+			
+			$order_number = $stripped_post['order_number'];
+			$payment_id = self::get_payment_id( $order_number );
 			$payment = Group_Buying_Payment::get_instance( $payment_id );
-			$items_to_capture = $this->items_to_capture( $payment );
+			$data = $payment->get_data();
+			// Build items_to_capture manually
+			$items_to_capture = array();
+			foreach ( $data['uncaptured_deals'] as $deal_id => $item ) {
+				if ( $deal->is_successful() ) {
+					if ( isset( $item['payment_method'][self::get_payment_method()] ) ) {
+						$items_to_capture[] = $deal_id;
+					}
+				}
+			}
 
 			// Check order not already completed
 			if ( $items_to_capture ) {
 				// Change payment data
-				foreach ( $items_to_capture as $deal_id => $amount ) {
+				foreach ( $items_to_capture as $deal_id ) {
 					unset( $data['uncaptured_deals'][$deal_id] );
 				}
 				if ( !isset( $data['capture_response'] ) ) {
 					$data['capture_response'] = array();
 				}
-				$data['capture_response'][] = $status;
+				$data['capture_response'][] = $stripped_post;
 				$payment->set_data( $data );
-
+				
 				// Payment completed
 				do_action( 'payment_captured', $payment, array_keys( $items_to_capture )  );
 				$payment->set_status( Group_Buying_Payment::STATUS_COMPLETE );
 				do_action( 'payment_complete', $payment );
-
+				
+				self::delete_record( $order_number );
 				$complete = TRUE;
 			}
 		}
 		return $complete;
 	}
 
-	public static function get_payment_id( $stripped_post ) {
-		$order_number = (int) $stripped_post['order_number'];
-
+	public static function get_payment_id( $order_number = 0 ) {
+		if ( !$order_number ) {
+			$stripped_post = stripslashes_deep( $_POST );
+			$order_number = $stripped_post['order_number'];
+		}
 		$record = Group_Buying_Record::get_instance( $order_number );
 		$data = $record->get_data();
-
-		do_action( 'gb_log', __CLASS__ . '::' . __FUNCTION__ . ' - Get Order ID:', $data );
-
 		return $data['payment_id'];
+	}
+	
+	public static function delete_record( $order_number = 0 ) {
+		if ( !$order_number ) {
+			$stripped_post = stripslashes_deep( $_POST );
+			$order_number = $stripped_post['order_number'];
+		}
+		if ( $order_number ) {
+			wp_delete_post( $order_number, TRUE );
+		}
 	}
 
 
