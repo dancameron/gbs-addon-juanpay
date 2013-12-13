@@ -9,7 +9,7 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	const API_MODE_OPTION = 'gb_juanpay_mode';
 
 	const TOKEN_KEY = 'gb_token_key'; // Combine with $blog_id to get the actual meta key
-	const TRANSACTION_TYPE = 'gb_mpay24_transaction'; // Combine with $blog_id to get the actual meta key
+	const TRANSACTION_TYPE = 'gb_juanpay_transaction'; // Combine with $blog_id to get the actual meta key
 
 	const MODE_TEST = 'sandbox';
 	const MODE_LIVE = 'live';
@@ -264,13 +264,13 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	*	If UNVERIFIED: false
 	*/
 	public function back_from_juanpay() {
-		if ( self::returned_from_offsite() ) {
+		if ( $this->returned_from_offsite() ) {
 			// Remove that review page since we're now returned.
 			add_filter('gb_checkout_pages', array($this, 'remove_checkout_page'));
 			$_REQUEST['gb_checkout_action'] = 'back_from_juanpay';
 		}
 		if ( !empty($_POST) && !isset($_POST['gb_checkout_action']) ) {
-			self::listener( $_POST );
+			$this->listener( $_POST );
 		}
 	}
 
@@ -357,8 +357,8 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	 */
 	public function listener() {
 		// Try to validate the response to make sure it's from JuanPay
-		if ( self::check_ipn_request_is_valid() ) {
-			if ( self::maybe_mark_payment_complete() ) {
+		if ( $this->check_ipn_request_is_valid() ) {
+			if ( $this->maybe_mark_payment_complete() ) {
 				exit();
 			}
 		}
@@ -373,7 +373,7 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	 * Validate the message by checking with JuanPay to make sure they really
 	 * sent it
 	 */
-	private static function check_ipn_request_is_valid() {
+	private function check_ipn_request_is_valid() {
 		// Get recieved values from post data
 		$received_values = array();
 		$received_values += stripslashes_deep( $_POST );
@@ -406,7 +406,7 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 	 * @param array $stripped_post
 	 * @return void
 	 */
-	public static function maybe_mark_payment_complete() {
+	public function maybe_mark_payment_complete() {
 		$complete = FALSE;
 		$stripped_post = stripslashes_deep( $_POST );
 
@@ -416,29 +416,23 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 		if ($stripped_post['status'] == 'Paid' || $stripped_post['status'] == 'Overpaid') {
 			
 			$order_number = $stripped_post['order_number'];
-			$payment_id = self::get_payment_id( $order_number );
+			
+			$payment_id = $this->get_payment_id( $order_number );
 			$payment = Group_Buying_Payment::get_instance( $payment_id );
-			$data = $payment->get_data();
-			// Build items_to_capture manually
-			$items_to_capture = array();
-			foreach ( $data['uncaptured_deals'] as $deal_id => $item ) {
-				if ( $deal->is_successful() ) {
-					if ( isset( $item['payment_method'][self::get_payment_method()] ) ) {
-						$items_to_capture[] = $deal_id;
-					}
-				}
-			}
 
+			$items_to_capture = $this->items_to_capture( $payment );
+			
 			// Check order not already completed
 			if ( $items_to_capture ) {
 				// Change payment data
-				foreach ( $items_to_capture as $deal_id ) {
+				$data = $payment->get_data();
+				foreach ( $items_to_capture as $deal_id => $amount ) {
 					unset( $data['uncaptured_deals'][$deal_id] );
 				}
 				if ( !isset( $data['capture_response'] ) ) {
 					$data['capture_response'] = array();
 				}
-				$data['capture_response'][] = $stripped_post;
+				$data['capture_response'][] = $response;
 				$payment->set_data( $data );
 				
 				// Payment completed
@@ -501,7 +495,7 @@ class Group_Buying_Juanpay extends Group_Buying_Offsite_Processors {
 
 	public function payment_controls( $controls, Group_Buying_Checkouts $checkout ) {
 		if ( isset($controls['review']) ) {
-			$controls['review'] = str_replace( 'value="'.self::__('Review').'"', $style . ' value="'.self::__('Juanpay').'"', $controls['review']);
+			$controls['review'] = str_replace( 'value="'.self::__('Review').'"', ' value="'.self::__('Juanpay').'"', $controls['review']);
 		}
 		return $controls;
 	}
